@@ -43,36 +43,24 @@ import java.util.stream.Collectors;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
+import edu.umd.cs.findbugs.ba.*;
+import edu.umd.cs.findbugs.bcel.BCELUtil;
+import edu.umd.cs.findbugs.classfile.*;
+import edu.umd.cs.findbugs.classfile.MissingClassException;
+import edu.umd.cs.findbugs.classfile.engine.bcel.LiveLocalStoreDataflowFactory;
+import org.apache.bcel.classfile.JavaClass;
+import org.apache.bcel.classfile.Method;
+import org.apache.bcel.generic.MethodGen;
 import org.dom4j.DocumentException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.asm.FBClassReader;
-import edu.umd.cs.findbugs.ba.AnalysisContext;
-import edu.umd.cs.findbugs.ba.AnalysisException;
-import edu.umd.cs.findbugs.ba.AnalysisFeatures;
-import edu.umd.cs.findbugs.ba.ObjectTypeFactory;
-import edu.umd.cs.findbugs.ba.SourceInfoMap;
-import edu.umd.cs.findbugs.ba.XClass;
-import edu.umd.cs.findbugs.ba.XFactory;
 import edu.umd.cs.findbugs.ba.jsr305.TypeQualifierAnnotation;
 import edu.umd.cs.findbugs.ba.jsr305.TypeQualifierApplications;
 import edu.umd.cs.findbugs.ba.jsr305.TypeQualifierValue;
 import edu.umd.cs.findbugs.bugReporter.BugReporterDecorator;
-import edu.umd.cs.findbugs.classfile.CheckedAnalysisException;
-import edu.umd.cs.findbugs.classfile.ClassDescriptor;
-import edu.umd.cs.findbugs.classfile.DescriptorFactory;
-import edu.umd.cs.findbugs.classfile.Global;
-import edu.umd.cs.findbugs.classfile.IAnalysisCache;
-import edu.umd.cs.findbugs.classfile.IAnalysisEngineRegistrar;
-import edu.umd.cs.findbugs.classfile.IClassFactory;
-import edu.umd.cs.findbugs.classfile.IClassObserver;
-import edu.umd.cs.findbugs.classfile.IClassPath;
-import edu.umd.cs.findbugs.classfile.IClassPathBuilder;
-import edu.umd.cs.findbugs.classfile.ICodeBase;
-import edu.umd.cs.findbugs.classfile.ICodeBaseEntry;
-import edu.umd.cs.findbugs.classfile.MissingClassException;
 import edu.umd.cs.findbugs.classfile.impl.ClassFactory;
 import edu.umd.cs.findbugs.config.AnalysisFeatureSetting;
 import edu.umd.cs.findbugs.config.UserPreferences;
@@ -982,7 +970,7 @@ public class FindBugs2 implements IFindBugsEngine, AutoCloseable {
         Profiler profiler = bugReporter.getProjectStats().getProfiler();
         profiler.start(this.getClass());
         AnalysisContext.currentXFactory().canonicalizeAll();
-        try {
+//        try {
             boolean multiplePasses = executionPlan.getNumPasses() > 1;
             if (executionPlan.getNumPasses() == 0) {
                 throw new AssertionError("no analysis passes");
@@ -1007,168 +995,216 @@ public class FindBugs2 implements IFindBugsEngine, AutoCloseable {
                     badClasses.add(desc);
                 }
             }
-            if (!badClasses.isEmpty()) {
-                referencedClassSet = new LinkedHashSet<>(referencedClassSet);
-                referencedClassSet.removeAll(badClasses);
-            }
+//            if (!badClasses.isEmpty()) {
+//                referencedClassSet = new LinkedHashSet<>(referencedClassSet);
+//                referencedClassSet.removeAll(badClasses);
+//            }
 
+            List<MethodDescriptor> methodDescriptorList = new LinkedList<>();
+            IAnalysisCache analysisCache = Global.getAnalysisCache();
+            int varCount = 0;
+            int lineCount = 0;
+//            int analyzedMethod = 0;
+            for (ClassDescriptor classDescriptor : referencedClassSet) {
+
+                try {
+//                    System.out.println("analyze "+classDescriptor.toString());
+                    ClassContext classContext = analysisCache.getClassAnalysis(ClassContext.class, classDescriptor);
+                    JavaClass jclass = analysisCache.getClassAnalysis(JavaClass.class, classDescriptor);
+                    for (Method method : classContext.getMethodsInCallOrder()) {
+                        MethodDescriptor methodDescriptor = BCELUtil.getMethodDescriptor(jclass, method);
+                        MethodGen methodGen = analysisCache.getMethodAnalysis(MethodGen.class, methodDescriptor);
+                        if(methodGen != null){
+                            varCount += methodGen.getMaxLocals();
+                            lineCount += methodGen.getInstructionList().size();
+                            methodDescriptorList.add(methodDescriptor);
+                        }
+                    }
+                } catch (CheckedAnalysisException e) {
+                    e.printStackTrace();
+                }
+            }
+            System.out.println("reference class: " + referencedClassSet.size() + "app class: " + appClassList.size());
+
+            LiveLocalStoreDataflowFactory liveLocalStoreDataflowFactory = new LiveLocalStoreDataflowFactory();
             long startTime = System.currentTimeMillis();
-            bugReporter.getProjectStats().setReferencedClasses(referencedClassSet.size());
-            for (Iterator<AnalysisPass> passIterator = executionPlan.passIterator(); passIterator.hasNext();) {
-                AnalysisPass pass = passIterator.next();
-                // The first pass is generally a non-reporting pass which
-                // gathers information about referenced classes.
-                boolean isNonReportingFirstPass = multiplePasses && passCount == 0;
-
-                // Instantiate the detectors
-                Detector2[] detectorList = pass.instantiateDetector2sInPass(bugReporter);
-
-                // If there are multiple passes, then on the first pass,
-                // we apply detectors to all classes referenced by the
-                // application classes.
-                // On subsequent passes, we apply detector only to application
-                // classes.
-                Collection<ClassDescriptor> classCollection = (isNonReportingFirstPass) ? referencedClassSet : appClassList;
-                AnalysisContext.currentXFactory().canonicalizeAll();
-                if (PROGRESS || LIST_ORDER) {
-                    System.out.printf("%6d : Pass %d: %d classes%n", (System.currentTimeMillis() - startTime) / 1000, passCount, classCollection
-                            .size());
-                    if (DEBUG) {
-                        XFactory.profile();
-                    }
+            System.out.println("Start live local store analysis.");
+            methodDescriptorList.forEach(methodDescriptor -> {
+                try {
+                    liveLocalStoreDataflowFactory.analyze(analysisCache, methodDescriptor);
+                } catch (CheckedAnalysisException e) {
+                    e.printStackTrace();
                 }
-                if (!isNonReportingFirstPass) {
-                    OutEdges<ClassDescriptor> outEdges = e -> {
-                        try {
-                            XClass classNameAndInfo = Global.getAnalysisCache().getClassAnalysis(XClass.class, e);
-                            return classNameAndInfo.getCalledClassDescriptors();
-                        } catch (CheckedAnalysisException e2) {
-                            AnalysisContext.logError("error while analyzing " + e.getClassName(), e2);
-                            return Collections.emptyList();
+            });
+            long elapsedTime = (System.currentTimeMillis() - startTime);
 
-                        }
-                    };
+            System.out.println("analyze " + methodDescriptorList.size() + " methods, " + lineCount + " statements, "+ varCount + " variables.");
+//            System.out.println("analyze " + );
+//            System.out.println("analyze " + );
+            System.out.println("liveLocalStore finishes, elapsed time: " + String.format("%.2fs", elapsedTime / 1000f));
+            return;
 
-                    classCollection = sortByCallGraph(classCollection, outEdges);
-                }
-                if (LIST_ORDER) {
-                    System.out.println("Analysis order:");
-                    for (ClassDescriptor c : classCollection) {
-                        System.out.println("  " + c);
-                    }
-                }
-                AnalysisContext currentAnalysisContext = AnalysisContext.currentAnalysisContext();
-                currentAnalysisContext.updateDatabases(passCount);
-
-                progressReporter.startAnalysis(classCollection.size());
-                int count = 0;
-                Global.getAnalysisCache().purgeAllMethodAnalysis();
-                Global.getAnalysisCache().purgeClassAnalysis(FBClassReader.class);
-                for (ClassDescriptor classDescriptor : classCollection) {
-                    long classStartNanoTime = 0;
-                    if (PROGRESS) {
-                        classStartNanoTime = System.nanoTime();
-                        System.out.printf("%6d %d/%d  %d/%d %s%n", (System.currentTimeMillis() - startTime) / 1000,
-                                passCount, executionPlan.getNumPasses(), count,
-                                classCollection.size(), classDescriptor);
-                    }
-                    count++;
-
-                    // Check to see if class is excluded by the class screener.
-                    // In general, we do not want to screen classes from the
-                    // first pass, even if they would otherwise be excluded.
-                    if ((SCREEN_FIRST_PASS_CLASSES || !isNonReportingFirstPass)
-                            && !classScreener.matches(classDescriptor.toResourceName())) {
-                        if (DEBUG) {
-                            System.out.println("*** Excluded by class screener");
-                        }
-                        continue;
-                    }
-                    boolean isHuge = currentAnalysisContext.isTooBig(classDescriptor);
-                    if (isHuge && currentAnalysisContext.isApplicationClass(classDescriptor)) {
-                        bugReporter.reportBug(new BugInstance("SKIPPED_CLASS_TOO_BIG", Priorities.NORMAL_PRIORITY)
-                                .addClass(classDescriptor));
-                    }
-                    currentClassName = ClassName.toDottedClassName(classDescriptor.getClassName());
-                    notifyClassObservers(classDescriptor);
-                    profiler.startContext(currentClassName);
-                    currentAnalysisContext.setClassBeingAnalyzed(classDescriptor);
-
-                    try {
-                        Collection<Callable<Void>> tasks = Arrays.stream(detectorList).map(detector -> (Callable<Void>) () -> {
-                            if (Thread.interrupted()) {
-                                throw new InterruptedException();
-                            }
-                            if (isHuge && !FirstPassDetector.class.isAssignableFrom(detector.getClass())) {
-                                return null;
-                            }
-                            LOG.debug("Applying {} to {}", detector.getDetectorClassName(), classDescriptor);
-                            try {
-                                profiler.start(detector.getClass());
-                                detector.visitClass(classDescriptor);
-                            } catch (MissingClassException e) {
-                                Global.getAnalysisCache().getErrorLogger().reportMissingClass(e.getClassDescriptor());
-                            } catch (CheckedAnalysisException | RuntimeException e) {
-                                logRecoverableException(classDescriptor, detector, e);
-                            } finally {
-                                profiler.end(detector.getClass());
-                            }
-                            return null;
-                        }).collect(Collectors.toList());
-                        service.invokeAll(tasks).forEach(future -> {
-                            try {
-                                future.get();
-                            } catch (InterruptedException e) {
-                                LOG.warn("Thread interrupted during analysis", e);
-                                Thread.currentThread().interrupt();
-                            } catch (ExecutionException e) {
-                                throw new AnalysisException("Exeption was thrown during analysis", e);
-                            }
-                        });
-                        if (Thread.interrupted()) {
-                            throw new InterruptedException();
-                        }
-                    } finally {
-
-                        progressReporter.finishClass();
-                        profiler.endContext(currentClassName);
-                        currentAnalysisContext.clearClassBeingAnalyzed();
-                        if (PROGRESS) {
-                            long usecs = (System.nanoTime() - classStartNanoTime) / 1000;
-                            if (usecs > 15000) {
-                                int classSize = currentAnalysisContext.getClassSize(classDescriptor);
-                                long speed = usecs / classSize;
-                                if (speed > 15) {
-                                    System.out.printf("  %6d usecs/byte  %6d msec  %6d bytes  %d pass %s%n", speed, usecs / 1000, classSize,
-                                            passCount,
-                                            classDescriptor);
-                                }
-                            }
-
-                        }
-                    }
-                }
-
-                // Call finishPass on each detector
-                for (Detector2 detector : detectorList) {
-                    detector.finishPass();
-                }
-
-                progressReporter.finishPerClassAnalysis();
-
-                passCount++;
-            }
-
-
-        } finally {
-
-            bugReporter.finish();
-            bugReporter.reportQueuedErrors();
-            profiler.end(this.getClass());
-            if (PROGRESS) {
-                System.out.println("Analysis completed");
-            }
-        }
+//            long startTime = System.currentTimeMillis();
+//            bugReporter.getProjectStats().setReferencedClasses(referencedClassSet.size());
+//            for (Iterator<AnalysisPass> passIterator = executionPlan.passIterator(); passIterator.hasNext();) {
+//                AnalysisPass pass = passIterator.next();
+//                // The first pass is generally a non-reporting pass which
+//                // gathers information about referenced classes.
+//                boolean isNonReportingFirstPass = multiplePasses && passCount == 0;
+//
+//                // Instantiate the detectors
+//                Detector2[] detectorList = pass.instantiateDetector2sInPass(bugReporter);
+//
+//                // If there are multiple passes, then on the first pass,
+//                // we apply detectors to all classes referenced by the
+//                // application classes.
+//                // On subsequent passes, we apply detector only to application
+//                // classes.
+//                Collection<ClassDescriptor> classCollection = (isNonReportingFirstPass) ? referencedClassSet : appClassList;
+//                AnalysisContext.currentXFactory().canonicalizeAll();
+//                if (PROGRESS || LIST_ORDER) {
+//                    System.out.printf("%6d : Pass %d: %d classes%n", (System.currentTimeMillis() - startTime) / 1000, passCount, classCollection
+//                            .size());
+//                    if (DEBUG) {
+//                        XFactory.profile();
+//                    }
+//                }
+//                if (!isNonReportingFirstPass) {
+//                    OutEdges<ClassDescriptor> outEdges = e -> {
+//                        try {
+//                            XClass classNameAndInfo = Global.getAnalysisCache().getClassAnalysis(XClass.class, e);
+//                            return classNameAndInfo.getCalledClassDescriptors();
+//                        } catch (CheckedAnalysisException e2) {
+//                            AnalysisContext.logError("error while analyzing " + e.getClassName(), e2);
+//                            return Collections.emptyList();
+//
+//                        }
+//                    };
+//
+//                    classCollection = sortByCallGraph(classCollection, outEdges);
+//                }
+//                if (LIST_ORDER) {
+//                    System.out.println("Analysis order:");
+//                    for (ClassDescriptor c : classCollection) {
+//                        System.out.println("  " + c);
+//                    }
+//                }
+//                AnalysisContext currentAnalysisContext = AnalysisContext.currentAnalysisContext();
+//                currentAnalysisContext.updateDatabases(passCount);
+//
+//                progressReporter.startAnalysis(classCollection.size());
+//                int count = 0;
+//                Global.getAnalysisCache().purgeAllMethodAnalysis();
+//                Global.getAnalysisCache().purgeClassAnalysis(FBClassReader.class);
+//
+//                for (ClassDescriptor classDescriptor : classCollection) {
+//                    long classStartNanoTime = 0;
+//                    if (PROGRESS) {
+//                        classStartNanoTime = System.nanoTime();
+//                        System.out.printf("%6d %d/%d  %d/%d %s%n", (System.currentTimeMillis() - startTime) / 1000,
+//                                passCount, executionPlan.getNumPasses(), count,
+//                                classCollection.size(), classDescriptor);
+//                    }
+//                    count++;
+//
+//                    // Check to see if class is excluded by the class screener.
+//                    // In general, we do not want to screen classes from the
+//                    // first pass, even if they would otherwise be excluded.
+//                    if ((SCREEN_FIRST_PASS_CLASSES || !isNonReportingFirstPass)
+//                            && !classScreener.matches(classDescriptor.toResourceName())) {
+//                        if (DEBUG) {
+//                            System.out.println("*** Excluded by class screener");
+//                        }
+//                        continue;
+//                    }
+//                    boolean isHuge = currentAnalysisContext.isTooBig(classDescriptor);
+//                    if (isHuge && currentAnalysisContext.isApplicationClass(classDescriptor)) {
+//                        bugReporter.reportBug(new BugInstance("SKIPPED_CLASS_TOO_BIG", Priorities.NORMAL_PRIORITY)
+//                                .addClass(classDescriptor));
+//                    }
+//                    currentClassName = ClassName.toDottedClassName(classDescriptor.getClassName());
+//                    notifyClassObservers(classDescriptor);
+//                    profiler.startContext(currentClassName);
+//                    currentAnalysisContext.setClassBeingAnalyzed(classDescriptor);
+//
+//                    try {
+//                        Collection<Callable<Void>> tasks = Arrays.stream(detectorList).map(detector -> (Callable<Void>) () -> {
+//                            if (Thread.interrupted()) {
+//                                throw new InterruptedException();
+//                            }
+//                            if (isHuge && !FirstPassDetector.class.isAssignableFrom(detector.getClass())) {
+//                                return null;
+//                            }
+//                            LOG.debug("Applying {} to {}", detector.getDetectorClassName(), classDescriptor);
+//                            try {
+//                                profiler.start(detector.getClass());
+//                                detector.visitClass(classDescriptor);
+//                            } catch (MissingClassException e) {
+//                                Global.getAnalysisCache().getErrorLogger().reportMissingClass(e.getClassDescriptor());
+//                            } catch (CheckedAnalysisException | RuntimeException e) {
+//                                logRecoverableException(classDescriptor, detector, e);
+//                            } finally {
+//                                profiler.end(detector.getClass());
+//                            }
+//                            return null;
+//                        }).collect(Collectors.toList());
+//                        service.invokeAll(tasks).forEach(future -> {
+//                            try {
+//                                future.get();
+//                            } catch (InterruptedException e) {
+//                                LOG.warn("Thread interrupted during analysis", e);
+//                                Thread.currentThread().interrupt();
+//                            } catch (ExecutionException e) {
+//                                throw new AnalysisException("Exeption was thrown during analysis", e);
+//                            }
+//                        });
+//                        if (Thread.interrupted()) {
+//                            throw new InterruptedException();
+//                        }
+//                    } finally {
+//
+//                        progressReporter.finishClass();
+//                        profiler.endContext(currentClassName);
+//                        currentAnalysisContext.clearClassBeingAnalyzed();
+//                        if (PROGRESS) {
+//                            long usecs = (System.nanoTime() - classStartNanoTime) / 1000;
+//                            if (usecs > 15000) {
+//                                int classSize = currentAnalysisContext.getClassSize(classDescriptor);
+//                                long speed = usecs / classSize;
+//                                if (speed > 15) {
+//                                    System.out.printf("  %6d usecs/byte  %6d msec  %6d bytes  %d pass %s%n", speed, usecs / 1000, classSize,
+//                                            passCount,
+//                                            classDescriptor);
+//                                }
+//                            }
+//
+//                        }
+//                    }
+//                }
+//
+//                // Call finishPass on each detector
+//                for (Detector2 detector : detectorList) {
+//                    detector.finishPass();
+//                }
+//
+//                progressReporter.finishPerClassAnalysis();
+//
+//                passCount++;
+//            }
+//
+//
+//        } finally {
+//
+//            bugReporter.finish();
+//            bugReporter.reportQueuedErrors();
+//            profiler.end(this.getClass());
+//            if (PROGRESS) {
+//                System.out.println("Analysis completed");
+//            }
+//        }
+//        } catch (Exception e){
+//            e.printStackTrace();
+//        }
 
     }
 
